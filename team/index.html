@@ -878,8 +878,10 @@ const splitList = s => clean(s).split(/\s*,\s*(?![^(]*\))/).map(x => x.trim()).f
 
 function slug(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""); }
 
+// Fighter icon: the first letter of the name (no pictures on the guest page)
 function initials(name) {
-  return name.split(/\s+/).filter(w => /^[A-Za-z]/.test(w)).slice(0, 2).map(w => w[0].toUpperCase()).join("");
+  const first = (name || "").trim().charAt(0);
+  return /[A-Za-z]/.test(first) ? first.toUpperCase() : "?";
 }
 
 async function parseMundaPdf(buffer) {
