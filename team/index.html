@@ -679,6 +679,15 @@
   .import-panel input[type=file] { color: var(--text); margin: 10px 0; }
   .import-status { font-size: 13px; color: var(--muted); min-height: 20px; }
   .import-status.error { color: #ff8fa3; }
+  .import-panel label { display: block; font-size: 13px; color: var(--muted); margin-top: 12px; }
+  .import-panel input[type=text], .import-panel select {
+    width: 100%; box-sizing: border-box; padding: 10px 12px; margin: 4px 0 10px;
+    border-radius: 8px; border: 1px solid var(--gold-dim); background: var(--panel-2); color: var(--text); font-size: 15px;
+  }
+  .import-panel details { margin-top: 16px; }
+  .import-panel summary { color: var(--muted); font-size: 13px; cursor: pointer; }
+  .load-bar { height: 6px; margin: 0 14px 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+  .load-bar > div { height: 100%; width: 0; background: var(--gold); transition: width .3s; }
   .hidden { display: none !important; }
   .filter-bar { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
   .filter-btn { background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); border-radius: 8px; padding: 6px 4px; font-size: 11px; font-weight: 700; cursor: pointer; text-align: center; }
@@ -731,12 +740,24 @@
 </header>
 
 <section class="import-panel" id="importPanel">
-  <h2>Load your Munda Manager printout</h2>
-  <p>Choose the PDF exported from Munda Manager. It is read in your browser and saved only on this device. Nothing is uploaded.</p>
-  <input type="file" id="pdfInput" accept="application/pdf" />
-  <div class="import-status" id="importStatus"></div>
+  <h2>Load your gang from Munda Manager</h2>
+  <p>Paste the campaign ID from your campaign's Munda Manager link, pick your gang, and load it. Fighters fill in a few seconds apart, and the gang is saved on this device.</p>
+  <label for="apiCampaignId">Campaign ID</label>
+  <input type="text" id="apiCampaignId" value="d62f4efa-08f9-4ca0-a596-226919f47325" />
+  <button class="btn" id="apiCampaignBtn" onclick="apiLoadCampaign()">Find gangs</button>
+  <label for="apiGangSelect">Gang</label>
+  <select id="apiGangSelect" disabled></select>
+  <button class="btn btn-gold" id="apiGangBtn" onclick="apiLoadGang()" disabled>Load gang</button>
+  <div class="import-status" id="apiStatus"></div>
+  <details>
+    <summary>Or load a PDF instead</summary>
+    <p>Choose the PDF exported from Munda Manager. It is read in your browser and saved only on this device. Nothing is uploaded.</p>
+    <input type="file" id="pdfInput" accept="application/pdf" />
+    <div class="import-status" id="importStatus"></div>
+  </details>
 </section>
 
+<div class="load-bar hidden" id="loadBar"><div id="loadBarFill"></div></div>
 <section class="gang-strip hidden" id="gangMetrics"></section>
 
 <main class="deck-layout hidden" id="deck">
@@ -1348,6 +1369,186 @@ function openGangRef() {
 function closeGangRef() {
   document.getElementById("refModal").style.display = "none";
   document.getElementById("refFrame").src = "about:blank";
+}
+
+/* ---------- Munda Manager API: campaign -> gang -> fighters ---------- */
+const MM_API = "https://www.mundamanager.com/api";
+const MM_GAP_MS = 6000;           // the API allows 10 requests a minute per IP
+const MM_CACHE_MS = 15 * 60000;   // reuse responses on this device for 15 minutes
+let mmLastCall = 0;
+let mmGangs = [];
+
+async function mmGet(kind, id) {
+  const key = "mm-cache:" + kind + "/" + id;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const c = JSON.parse(raw);
+      if (Date.now() - c.at < MM_CACHE_MS) return c.data;
+    }
+  } catch (e) {}
+  const wait = mmLastCall + MM_GAP_MS - Date.now();
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  mmLastCall = Date.now();
+  const res = await fetch(MM_API + "/" + kind + "/" + id + "/data?format=json");
+  if (!res.ok) throw new Error("Munda Manager returned " + res.status);
+  const data = await res.json();
+  try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), data })); } catch (e) {}
+  return data;
+}
+
+// Some responses wrap the record, e.g. { "fighter": {...} }
+const mmUnwrap = (d, key) => (d && d[key] && typeof d[key] === "object") ? d[key] : d;
+
+function mmFindGangs(obj) {
+  const out = [];
+  (function walk(o) {
+    if (Array.isArray(o)) { o.forEach(walk); return; }
+    if (!o || typeof o !== "object") return;
+    if (Array.isArray(o.gangs)) {
+      o.gangs.forEach(g => { if (g && g.id) out.push({ id: g.id, name: g.name || g.gang_name || g.id, owner: o.name || o.username || "" }); });
+    }
+    Object.values(o).forEach(walk);
+  })(obj);
+  const seen = new Set();
+  return out.filter(g => !seen.has(g.id) && seen.add(g.id));
+}
+
+// API stat names -> shell stat keys. The PDF showed WS, BS, I, Ld, Cl, Wil and Int with a "+" and M with a '"'.
+const MM_STATS = [["M", "movement", '"'], ["WS", "weapon_skill", "+"], ["BS", "ballistic_skill", "+"], ["S", "strength", ""],
+  ["T", "toughness", ""], ["W", "wounds", ""], ["I", "initiative", "+"], ["A", "attacks", ""], ["Ld", "leadership", "+"],
+  ["Cl", "cool", "+"], ["Wil", "willpower", "+"], ["Int", "intelligence", "+"]];
+
+function mmMapGang(g) {
+  return {
+    title: g.name || "Gang",
+    house: g.type || "",
+    credits: g.credits ?? 0,
+    rating: g.rating ?? 0,
+    wealth: g.wealth ?? 0,
+    reputation: g.reputation ?? 0
+  };
+}
+
+function mmMapFighter(f) {
+  const src = f.stats || {};
+  const stats = {};
+  MM_STATS.forEach(([short, key, suffix]) => {
+    stats[short] = src[key] == null ? "–" : src[key] + suffix;
+  });
+  const weapons = [];
+  (f.weapons || []).forEach(w => {
+    (w.profiles && w.profiles.length ? w.profiles : [{}]).forEach((p, i) => {
+      weapons.push({
+        name: i === 0 ? w.name : (p.name || w.name),
+        rngS: p.range_short ?? "–", rngL: p.range_long ?? "–",
+        accS: p.acc_short ?? "–", accL: p.acc_long ?? "–",
+        str: p.strength ?? "–", ap: p.ap ?? "–", d: p.damage ?? "–", am: p.ammo ?? "–",
+        traits: splitList(p.traits || "")
+      });
+    });
+  });
+  const effects = f.effects || [];
+  const status = (f.killed || f.retired || f.enslaved || f.captured) ? "unavailable" : (f.recovery ? "injured" : "ready");
+  return {
+    id: f.id,
+    name: f.name || "?",
+    role: [f.type, ...(f.subtypes || [])].filter(Boolean).join(" • "),
+    rating: f.cost ?? 0,
+    stats,
+    skills: f.skills || [],
+    weapons,
+    wargear: (f.wargear_items || []).map(w => w.name),
+    rules: [...(f.special_rules || []), ...effects.filter(e => e.category === "advancements").map(e => "Advancement: " + e.name)],
+    injuries: effects.filter(e => e.category === "injuries").map(e => e.name),
+    quote: "",
+    tactics: "",
+    note: "",
+    defaultXp: f.xp ?? 0,
+    defaultStatus: status,
+    squad: "all"
+  };
+}
+
+function mmProgress(done, total) {
+  const bar = document.getElementById("loadBar");
+  if (!total || done >= total) {
+    bar.classList.add("hidden");
+    if (GANG) document.getElementById("gangSub").textContent = GANG.house + " • Live Tabletop Deck";
+    return;
+  }
+  bar.classList.remove("hidden");
+  document.getElementById("loadBarFill").style.width = Math.round(done / total * 100) + "%";
+  document.getElementById("gangSub").textContent = "Loading fighters " + done + " of " + total + "…";
+}
+
+async function apiLoadCampaign() {
+  const btn = document.getElementById("apiCampaignBtn");
+  const msg = document.getElementById("apiStatus");
+  const id = document.getElementById("apiCampaignId").value.trim();
+  if (!id) { msg.className = "import-status error"; msg.textContent = "Paste a campaign ID first."; return; }
+  btn.disabled = true;
+  msg.className = "import-status";
+  msg.textContent = "Finding gangs…";
+  try {
+    mmGangs = mmFindGangs(await mmGet("campaigns", id));
+    const sel = document.getElementById("apiGangSelect");
+    sel.innerHTML = "";
+    mmGangs.forEach((g, i) => {
+      const o = document.createElement("option");
+      o.value = i;
+      o.textContent = (g.owner ? g.owner + " — " : "") + g.name;
+      sel.appendChild(o);
+    });
+    sel.disabled = !mmGangs.length;
+    document.getElementById("apiGangBtn").disabled = !mmGangs.length;
+    if (mmGangs.length) {
+      msg.textContent = "Found " + mmGangs.length + " gangs. Pick yours and load it.";
+    } else {
+      msg.className = "import-status error";
+      msg.textContent = "No gangs found in that campaign.";
+    }
+  } catch (e) {
+    msg.className = "import-status error";
+    msg.textContent = "Could not load the campaign: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function apiLoadGang() {
+  const g = mmGangs[document.getElementById("apiGangSelect").value];
+  if (!g) return;
+  const btn = document.getElementById("apiGangBtn");
+  const msg = document.getElementById("apiStatus");
+  btn.disabled = true;
+  msg.className = "import-status";
+  msg.textContent = "Loading gang…";
+  try {
+    const raw = await mmGet("gangs", g.id);
+    const gang = mmUnwrap(raw, "gang");
+    const list = Array.isArray(raw.fighters) ? raw.fighters : (Array.isArray(gang.fighters) ? gang.fighters : []);
+    GANG = mmMapGang(gang);
+    ROSTER = [];
+    state = { selectedId: null, round: 1, statuses: {}, ticks: {}, picks: {}, pickMax: 0, pickCr: 0 };
+    showPlay();
+    mmProgress(0, list.length);
+    for (let i = 0; i < list.length; i++) {
+      ROSTER.push(mmMapFighter(mmUnwrap(await mmGet("fighters", list[i].id), "fighter")));
+      ensureDefaults();
+      renderAll();
+      mmProgress(i + 1, list.length);
+    }
+    saveAll();
+  } catch (e) {
+    msg.className = "import-status error";
+    msg.textContent = "Could not finish loading: " + e.message;
+    if (GANG) document.getElementById("gangSub").textContent = "Could not finish loading: " + e.message;
+    mmProgress(0, 0);
+    document.getElementById("importPanel").classList.remove("hidden");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /* ---------- Start ---------- */
