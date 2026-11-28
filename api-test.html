@@ -184,6 +184,7 @@ function render(gang, fighters) {
   ["Fighter", "Type", "XP", "Weapons", ...short].forEach((t, i) => {
     const th = document.createElement("th");
     th.textContent = t;
+    if (i >= 2) th.className = "num";
     head.appendChild(th);
   });
   table.appendChild(head);
