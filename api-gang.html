@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Munda API gang test</title>
+<style>
+  :root { --gold: #e2b857; --gold-dim: #9e7e34; --panel: #140e1f; --panel-2: #1b1126; --border: #2d2140; --text: #f4f1ea; --muted: #a9a1bd; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0c0911; color: var(--text); margin: 0; padding: 14px; }
+  h1 { font-size: 18px; color: var(--gold); margin: 0 0 4px; }
+  h2 { font-size: 15px; color: var(--gold); margin: 18px 0 8px; }
+  p, label { font-size: 14px; line-height: 1.5; color: var(--muted); }
+  input, select, button { font-size: 15px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--gold-dim); background: var(--panel-2); color: var(--text); max-width: 100%; }
+  input, select { width: 100%; margin: 4px 0 10px; }
+  button { margin: 4px 6px 4px 0; }
+  button:disabled { opacity: .5; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin: 10px 0; }
+  .card.placeholder { opacity: .55; }
+  .head { display: flex; gap: 12px; align-items: center; }
+  .head img { width: 64px; height: 64px; border-radius: 10px; object-fit: cover; border: 1px solid var(--gold-dim); }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+  .tag { font-size: 12px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--gold-dim); color: var(--gold); }
+  .stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; text-align: center; margin: 8px 0; }
+  .stats div { background: var(--panel-2); border-radius: 6px; padding: 4px 0; }
+  .stats span { display: block; font-size: 11px; color: var(--muted); }
+  .stats b { font-size: 15px; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--gold); }
+  td.num, th.num { text-align: right; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .progress { height: 8px; background: var(--panel-2); border-radius: 6px; overflow: hidden; margin: 6px 0; }
+  .progress > div { height: 100%; background: var(--gold); width: 0; transition: width .3s; }
+  #log { font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: var(--panel); border: 1px solid var(--border); padding: 8px; border-radius: 8px; max-height: 140px; overflow: auto; white-space: pre-wrap; }
+  .ok { color: #7ee2a8; } .bad { color: #ff8fa3; }
+  .backstory p { font-size: 13px; line-height: 1.5; color: var(--muted); margin: 6px 0; }
+  a { color: var(--gold); }
+</style>
+</head>
+<body>
+<h1>Munda Manager gang test</h1>
+<p>Paste a campaign ID, pick a gang, and see its full data. Each request is spaced about six seconds apart. Results are kept on this device for 15 minutes.</p>
+
+<label for="campaignId">Campaign ID</label>
+<input id="campaignId" value="d62f4efa-08f9-4ca0-a596-226919f47325">
+<button id="btnCampaign" onclick="loadCampaign()">Load campaign</button>
+
+<label for="gangSelect">Gang</label>
+<select id="gangSelect" disabled></select>
+<button id="btnGang" onclick="loadGang()" disabled>Load gang</button>
+
+<div id="status" class="muted"></div>
+<div class="progress"><div id="bar"></div></div>
+<div id="log"></div>
+
+<div id="gang"></div>
+<div id="fighters"></div>
+
+<script>
+const API = "https://www.mundamanager.com/api";
+const GAP_MS = 6000;
+const CACHE_MS = 15 * 60000;
+const CACHE_PREFIX = "mm-gang-cache:";
+const GANG_REF_PAGES = [
+  [/escher/i, "escher.html"], [/orlock/i, "orlock.html"], [/cawdor/i, "cawdor.html"],
+  [/delaque/i, "delaque.html"], [/goliath/i, "goliath.html"], [/van ?saar/i, "vansaar.html"],
+  [/palanite/i, "palanites.html"], [/venator/i, "venators.html"], [/corpse ?grinder/i, "corpsegrinder.html"],
+  [/outcast/i, "outcasts.html"], [/free ?ogryn/i, "freeogryns.html"], [/genestealer/i, "genestealer.html"],
+  [/chaos ?helot/i, "chaoshelots.html"], [/malstrain/i, "themalstrain.html"], [/spyre/i, "spyre.html"],
+  [/ironhead|squat/i, "ironheads.html"], [/ash ?waste|nomad/i, "ashwastenomads.html"]
+];
+let lastCallAt = 0;
+let requestCount = 0;
+let campaignGangs = [];
+
+function $(id) { return document.getElementById(id); }
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = String(text);
+  return e;
+}
+function log(msg) {
+  const box = $("log");
+  box.textContent += new Date().toLocaleTimeString() + "  " + msg + "\n";
+  box.scrollTop = box.scrollHeight;
+}
+function setStatus(msg, cls) { $("status").className = "muted " + (cls || ""); $("status").textContent = msg; }
+function setProgress(done, total) { $("bar").style.width = total ? Math.round(done / total * 100) + "%" : "0"; }
+
+function readCache(key) {
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + key);
+    if (!raw) return null;
+    const c = JSON.parse(raw);
+    return (Date.now() - c.at) < CACHE_MS ? c.data : null;
+  } catch (e) { return null; }
+}
+function writeCache(key, data) {
+  try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify({ at: Date.now(), data })); } catch (e) {}
+}
+async function paced(url) {
+  const wait = lastCallAt + GAP_MS - Date.now();
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  lastCallAt = Date.now();
+  requestCount++;
+  log("request " + requestCount + ": " + url.replace(API, ""));
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("status " + res.status);
+  return res.json();
+}
+async function cachedGet(kind, id) {
+  const key = kind + "/" + id;
+  const hit = readCache(key);
+  if (hit) { log("cache: " + key); return { data: hit, cached: true }; }
+  const data = await paced(API + "/" + kind + "/" + id + "/data?format=json");
+  writeCache(key, data);
+  return { data, cached: false };
+}
+const unwrap = (d, key) => (d && d[key] && typeof d[key] === "object") ? d[key] : d;
+
+function findGangs(obj) {
+  const out = [];
+  (function walk(o) {
+    if (Array.isArray(o)) { o.forEach(walk); return; }
+    if (!o || typeof o !== "object") return;
+    if (Array.isArray(o.gangs)) {
+      o.gangs.forEach(g => { if (g && g.id) out.push({ id: g.id, name: g.name || g.gang_name || g.id, owner: o.name || o.username || "" }); });
+    }
+    Object.values(o).forEach(walk);
+  })(obj);
+  const seen = new Set();
+  return out.filter(g => !seen.has(g.id) && seen.add(g.id));
+}
+
+async function loadCampaign() {
+  $("btnCampaign").disabled = true;
+  setStatus("Loading campaign…");
+  try {
+    const { data } = await cachedGet("campaigns", $("campaignId").value.trim());
+    campaignGangs = findGangs(data);
+    const sel = $("gangSelect");
+    sel.innerHTML = "";
+    campaignGangs.forEach((g, i) => {
+      const o = document.createElement("option");
+      o.value = i;
+      o.textContent = (g.owner ? g.owner + " — " : "") + g.name;
+      sel.appendChild(o);
+    });
+    sel.disabled = !campaignGangs.length;
+    $("btnGang").disabled = !campaignGangs.length;
+    setStatus("Found " + campaignGangs.length + " gangs.", campaignGangs.length ? "ok" : "bad");
+  } catch (e) {
+    setStatus("Campaign failed: " + e.message, "bad");
+    log("ERROR " + e.message);
+  } finally {
+    $("btnCampaign").disabled = false;
+  }
+}
+
+async function loadGang() {
+  const g = campaignGangs[$("gangSelect").value];
+  if (!g) return;
+  $("btnGang").disabled = true;
+  $("gang").textContent = "";
+  $("fighters").textContent = "";
+  setProgress(0, 1);
+  try {
+    setStatus("Loading gang…");
+    const gangRes = await cachedGet("gangs", g.id);
+    const raw = gangRes.data;
+    const gang = unwrap(raw, "gang");
+    renderGang(gang);
+    const list = Array.isArray(raw.fighters) ? raw.fighters : (Array.isArray(gang.fighters) ? gang.fighters : []);
+    // Placeholder cards so the list is visible straight away
+    const placeholders = list.map(f => {
+      const c = el("div", "card placeholder", "Loading " + (f.name || "fighter") + "…");
+      $("fighters").appendChild(c);
+      return c;
+    });
+    setProgress(0, list.length);
+    for (let i = 0; i < list.length; i++) {
+      setStatus("Loading fighter " + (i + 1) + " of " + list.length + "…");
+      const { data } = await cachedGet("fighters", list[i].id);
+      const f = unwrap(data, "fighter");
+      placeholders[i].replaceWith(renderFighter(f));
+      setProgress(i + 1, list.length);
+    }
+    setStatus("Done: " + list.length + " fighters.", "ok");
+  } catch (e) {
+    setStatus("Failed: " + e.message, "bad");
+    log("ERROR " + e.message);
+  } finally {
+    $("btnGang").disabled = false;
+  }
+}
+
+function backstoryParagraphs(html) {
+  const doc = new DOMParser().parseFromString(html || "", "text/html");
+  return Array.from(doc.body.querySelectorAll("p")).map(p => p.textContent.trim()).filter(Boolean);
+}
+
+function renderGang(gang) {
+  const box = $("gang");
+  const card = el("div", "card");
+  const head = el("div", "head");
+  if (gang.image_url) {
+    const img = document.createElement("img");
+    img.src = gang.image_url;
+    img.alt = "";
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    head.appendChild(img);
+  }
+  const titles = el("div");
+  titles.appendChild(el("div", "", gang.name || "Gang"));
+  titles.lastChild.style.cssText = "font-size:18px;color:#e2b857;font-weight:700";
+  titles.appendChild(el("div", "muted", gang.type || ""));
+  head.appendChild(titles);
+  card.appendChild(head);
+
+  const tags = el("div", "tags");
+  [["Rating", gang.rating], ["Wealth", gang.wealth], ["Credits", gang.credits], ["Reputation", gang.reputation]]
+    .forEach(([k, v]) => tags.appendChild(el("span", "tag", k + " " + (v ?? "?"))));
+  card.appendChild(tags);
+
+  // Ancillary: house rules from the reference pages, shown as a link
+  const ref = GANG_REF_PAGES.find(([re]) => re.test(gang.type || gang.name || ""));
+  if (ref) {
+    const p = el("p", "muted");
+    p.append("House rules and equipment: ");
+    const a = document.createElement("a");
+    a.href = ref[1];
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = "gang reference page";
+    p.appendChild(a);
+    card.appendChild(p);
+  }
+
+  const story = backstoryParagraphs(gang.backstory);
+  if (story.length) {
+    const b = el("div", "backstory");
+    story.forEach(t => b.appendChild(el("p", "", t)));
+    card.appendChild(b);
+  }
+  box.appendChild(card);
+}
+
+function renderFighter(f) {
+  const card = el("div", "card");
+  const title = el("div", "", (f.name || "?") + "  ·  " + (f.type || "") + (f.subtypes && f.subtypes.length ? " (" + f.subtypes.join(", ") + ")" : ""));
+  title.style.cssText = "font-weight:700;color:#f4f1ea";
+  card.appendChild(title);
+  card.appendChild(el("div", "muted", "Cost " + (f.cost ?? "?") + " · XP " + (f.xp ?? 0) + " · Kills " + (f.kills ?? 0)));
+
+  const s = f.stats || {};
+  const grid = el("div", "stats");
+  [["M", "movement"], ["WS", "weapon_skill"], ["BS", "ballistic_skill"], ["S", "strength"], ["T", "toughness"], ["W", "wounds"],
+   ["I", "initiative"], ["A", "attacks"], ["Ld", "leadership"], ["Cl", "cool"], ["Wil", "willpower"], ["Int", "intelligence"], ["Sv", "save"]]
+    .forEach(([label, key]) => {
+      const cell = el("div");
+      cell.appendChild(el("span", "", label));
+      cell.appendChild(el("b", "", s[key] == null ? "–" : s[key]));
+      grid.appendChild(cell);
+    });
+  card.appendChild(grid);
+
+  const weapons = Array.isArray(f.weapons) ? f.weapons : [];
+  if (weapons.length) {
+    const wrap = el("div", "scroll");
+    const t = document.createElement("table");
+    const head = document.createElement("tr");
+    ["Weapon", "Range S", "Range L", "Acc S", "Acc L", "Str", "AP", "D", "Am", "Traits"].forEach((h, i) => {
+      const th = el("th", i >= 1 && i <= 8 ? "num" : "", h);
+      head.appendChild(th);
+    });
+    t.appendChild(head);
+    weapons.forEach(w => (w.profiles || [{}]).forEach((p, idx) => {
+      const tr = document.createElement("tr");
+      const vals = [idx === 0 ? w.name : "  " + (p.name || ""), p.range_short, p.range_long, p.acc_short, p.acc_long, p.strength, p.ap, p.damage, p.ammo, p.traits];
+      vals.forEach((v, i) => tr.appendChild(el("td", i >= 1 && i <= 8 ? "num" : "", v ?? "–")));
+      t.appendChild(tr);
+    }));
+    wrap.appendChild(t);
+    card.appendChild(wrap);
+  }
+
+  const lists = [
+    ["Skills", (f.skills || []).map(x => typeof x === "string" ? x : x.name)],
+    ["Special rules", (f.special_rules || []).map(x => typeof x === "string" ? x : x.name)],
+    ["Wargear", (f.wargear_items || []).map(x => x.name)],
+    ["Effects", (f.effects || []).map(x => (x.category ? x.category + ": " : "") + x.name)]
+  ];
+  lists.forEach(([label, items]) => {
+    if (!items.length) return;
+    const p = el("p", "muted");
+    p.append(label + ": ");
+    p.appendChild(document.createTextNode(items.join(", ")));
+    card.appendChild(p);
+  });
+  return card;
+}
+</script>
+</body>
+</html>
